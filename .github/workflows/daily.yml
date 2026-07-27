@@ -1,4 +1,55 @@
 name: Daily AI Investment Bot
-'on': {workflow_dispatch: {}, schedule: [{cron: "0 23 * * *"}]}
-permissions: {contents: read}
-jobs: {send-message: {runs-on: ubuntu-latest, steps: [{name: Checkout, uses: actions/checkout@v4}, {name: Install requests, run: "python -m pip install requests yfinance pandas matplotlib"}, {name: Send Telegram message, env: {TELEGRAM_BOT_TOKEN: "${{ secrets.TELEGRAM_BOT_TOKEN }}", TELEGRAM_CHAT_ID: "${{ secrets.TELEGRAM_CHAT_ID }}"}, run: "python bot.py"}]}}
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    - cron: "0 8 * * *"
+      timezone: "Asia/Seoul"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-ai-investment-bot
+  cancel-in-progress: false
+
+jobs:
+  send-briefing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Python packages
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install requests yfinance pandas matplotlib feedparser openai
+
+      - name: Check market briefing file
+        run: |
+          test -f market_brief.py
+          python -m py_compile market_brief.py
+
+      - name: Send sentiment chart
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python bot.py
+
+      - name: Send market, watchlist, news and analysis
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TOSS_CLIENT_ID: ${{ secrets.TOSS_CLIENT_ID }}
+          TOSS_CLIENT_SECRET: ${{ secrets.TOSS_CLIENT_SECRET }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python market_brief.py
