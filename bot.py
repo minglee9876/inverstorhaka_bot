@@ -1,31 +1,26 @@
-import requests
-import datetime
+name: Daily AI Investment Bot
 
-TOKEN = "여기에_봇_토큰_붙여넣기"
-CHAT_ID = "여기에_내_ID_붙여넣기"
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 23 * * *"
 
+permissions:
+  contents: read
 
-now = datetime.datetime.now()
+jobs:
+  send-message:
+    runs-on: ubuntu-latest
 
-message = f"""
-☀️ AI 투자 비서 테스트
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
 
-현재 시간:
-{now}
+      - name: Install requests
+        run: python -m pip install requests
 
-봇 연결 성공했습니다.
-
-앞으로 매일 아침
-투자 브리핑을 보내드릴 예정입니다.
-"""
-
-
-url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-
-requests.post(
-    url,
-    data={
-        "chat_id": CHAT_ID,
-        "text": message
-    }
-)
+      - name: Send Telegram message
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python bot.py
