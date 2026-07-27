@@ -1,9 +1,8 @@
-
 import requests
 import datetime
 
-TOKEN = "8707966786:AAFWqAfaI1YoCsc8xMs3UbdNDAyXIQAlLYI"
-CHAT_ID = "837467820"
+TOKEN = "여기에_봇_토큰_붙여넣기"
+CHAT_ID = "여기에_내_ID_붙여넣기"
 
 
 now = datetime.datetime.now()
