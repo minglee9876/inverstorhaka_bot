@@ -4,17 +4,17 @@ on:
   workflow_dispatch:
 
   schedule:
-    # Korea Standard Time (KST)
-    # 08:00 KST = 23:00 UTC (previous day)
-    # 10:00 KST = 01:00 UTC
-    # 12:00 KST = 03:00 UTC
-    # 14:00 KST = 05:00 UTC
-    # 15:00 KST = 06:00 UTC
-    - cron: "0 23 * * *"
-    - cron: "0 1 * * *"
-    - cron: "0 3 * * *"
-    - cron: "0 5 * * *"
-    - cron: "0 6 * * *"
+    # GitHub Actions cron uses UTC
+    # 08:07 KST = 23:07 UTC (previous day)
+    # 10:07 KST = 01:07 UTC
+    # 12:07 KST = 03:07 UTC
+    # 14:07 KST = 05:07 UTC
+    # 15:07 KST = 06:07 UTC
+    - cron: "7 23 * * *"
+    - cron: "7 1 * * *"
+    - cron: "7 3 * * *"
+    - cron: "7 5 * * *"
+    - cron: "7 6 * * *"
 
 permissions:
   contents: read
@@ -57,8 +57,4 @@ jobs:
       - name: Send market, watchlist, news and analysis
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TOSS_CLIENT_ID: ${{ secrets.TOSS_CLIENT_ID }}
-          TOSS_CLIENT_SECRET: ${{ secrets.TOSS_CLIENT_SECRET }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: python market_brief.py
+          TELEGRAM_CHAT
