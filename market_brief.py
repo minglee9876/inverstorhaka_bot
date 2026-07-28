@@ -1,4 +1,6 @@
 import html
+import json
+import math
 import os
 import time
 import urllib.parse
@@ -17,49 +19,28 @@ except ImportError:
 
 
 # =========================================================
-# GitHub Secrets
+# GitHub Secrets / 환경변수
 # =========================================================
 
-TELEGRAM_TOKEN = os.getenv(
-    "TELEGRAM_BOT_TOKEN",
-    "",
-).strip()
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+TOSS_CLIENT_ID = os.getenv("TOSS_CLIENT_ID", "").strip()
+TOSS_CLIENT_SECRET = os.getenv("TOSS_CLIENT_SECRET", "").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
-TELEGRAM_CHAT_ID = os.getenv(
-    "TELEGRAM_CHAT_ID",
-    "",
+# 기존 기본 모델을 유지합니다.
+# GitHub Actions env에 OPENAI_MODEL을 넣으면 코드 수정 없이 교체할 수 있습니다.
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini").strip()
+OPENAI_REASONING_EFFORT = os.getenv(
+    "OPENAI_REASONING_EFFORT",
+    "medium",
 ).strip()
-
-TOSS_CLIENT_ID = os.getenv(
-    "TOSS_CLIENT_ID",
-    "",
-).strip()
-
-TOSS_CLIENT_SECRET = os.getenv(
-    "TOSS_CLIENT_SECRET",
-    "",
-).strip()
-
-OPENAI_API_KEY = os.getenv(
-    "OPENAI_API_KEY",
-    "",
-).strip()
-
-OPENAI_MODEL = os.getenv(
-    "OPENAI_MODEL",
-    "gpt-5-mini",
-).strip()
-
 
 if not TELEGRAM_TOKEN:
-    raise RuntimeError(
-        "TELEGRAM_BOT_TOKEN Secret이 없습니다."
-    )
+    raise RuntimeError("TELEGRAM_BOT_TOKEN Secret이 없습니다.")
 
 if not TELEGRAM_CHAT_ID:
-    raise RuntimeError(
-        "TELEGRAM_CHAT_ID Secret이 없습니다."
-    )
+    raise RuntimeError("TELEGRAM_CHAT_ID Secret이 없습니다.")
 
 
 # =========================================================
@@ -67,6 +48,7 @@ if not TELEGRAM_CHAT_ID:
 # =========================================================
 
 TOSS_BASE_URL = "https://openapi.tossinvest.com"
+KST = ZoneInfo("Asia/Seoul")
 
 HEADERS = {
     "User-Agent": (
@@ -77,8 +59,6 @@ HEADERS = {
     )
 }
 
-
-# 미국 시장 지수
 MARKET_SYMBOLS = {
     "S&P500": "^GSPC",
     "나스닥": "^IXIC",
@@ -90,8 +70,6 @@ MARKET_SYMBOLS = {
     "VIX": "^VIX",
 }
 
-
-# 관심 종목
 WATCHLIST = {
     "삼성전자": {
         "toss": "005930",
@@ -120,8 +98,6 @@ WATCHLIST = {
     },
 }
 
-
-# Google 뉴스 검색어
 NEWS_QUERIES = [
     "미국 증시 AI 반도체 when:1d",
     "삼성전자 SK하이닉스 HBM 반도체 when:1d",
@@ -131,18 +107,129 @@ NEWS_QUERIES = [
 
 
 # =========================================================
+# 공통 유틸리티
+# =========================================================
+
+def finite_float(value):
+    """유효한 숫자는 float로, NaN/무한대/빈 값은 None으로 반환합니다."""
+    if value is None:
+        return None
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    if not math.isfinite(number):
+        return None
+
+    return number
+
+
+def round_or_none(value, digits=4):
+    number = finite_float(value)
+    if number is None:
+        return None
+    return round(number, digits)
+
+
+def json_ready(value):
+    """OpenAI 입력 JSON에 NaN이나 pandas 타입이 섞이지 않게 정리합니다."""
+    if isinstance(value, dict):
+        return {
+            str(key): json_ready(item)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, (list, tuple)):
+        return [json_ready(item) for item in value]
+
+    if isinstance(value, (float, int)):
+        return round_or_none(value)
+
+    return value
+
+
+def pct_return(close: pd.Series, periods: int):
+    if len(close) <= periods:
+        return None
+
+    past = finite_float(close.iloc[-1 - periods])
+    current = finite_float(close.iloc[-1])
+
+    if past in (None, 0) or current is None:
+        return None
+
+    return (current / past - 1) * 100
+
+
+def distance_pct(current, reference):
+    current = finite_float(current)
+    reference = finite_float(reference)
+
+    if current is None or reference in (None, 0):
+        return None
+
+    return (current / reference - 1) * 100
+
+
+def display_pct(value):
+    value = finite_float(value)
+    if value is None:
+        return "확인 불가"
+    return f"{value:+.1f}%"
+
+
+def display_number(value, digits=1):
+    value = finite_float(value)
+    if value is None:
+        return "확인 불가"
+    return f"{value:.{digits}f}"
+
+
+def arrow(value: float) -> str:
+    value = finite_float(value)
+
+    if value is None or value == 0:
+        return "－"
+    if value > 0:
+        return "▲"
+    return "▼"
+
+
+def stock_price(currency: str, value: float) -> str:
+    if currency == "KRW":
+        return f"₩{value:,.0f}"
+    return f"${value:,.2f}"
+
+
+def truncate_plain_text(text: str, max_chars: int = 3300) -> str:
+    """
+    GPT가 길이 지시를 초과해도 Telegram의 4096자 제한에 걸리지 않게 합니다.
+    HTML escape 전에 일반 텍스트 상태에서 자릅니다.
+    """
+    text = (text or "").strip()
+
+    if len(text) <= max_chars:
+        return text
+
+    shortened = text[:max_chars]
+
+    if "\n" in shortened:
+        shortened = shortened.rsplit("\n", 1)[0]
+
+    return shortened.rstrip() + "\n\n…분량 제한으로 일부 내용이 생략되었습니다."
+
+
+# =========================================================
 # Yahoo Finance
 # =========================================================
 
 def get_yahoo_history(
     symbol: str,
-    period: str = "6mo",
+    period: str = "1y",
 ) -> pd.DataFrame:
-    """
-    Yahoo Finance에서 일봉 데이터를 가져옵니다.
-    실패할 경우 최대 3번 다시 시도합니다.
-    """
-
+    """Yahoo Finance에서 일봉 데이터를 가져오며 최대 3번 재시도합니다."""
     last_error = None
 
     for attempt in range(3):
@@ -154,27 +241,17 @@ def get_yahoo_history(
                 timeout=30,
             )
 
-            if (
-                not frame.empty
-                and "Close" in frame.columns
-            ):
+            if not frame.empty and "Close" in frame.columns:
                 return frame
 
         except Exception as error:
             last_error = error
-
-            print(
-                f"Yahoo {symbol} 오류 "
-                f"{attempt + 1}/3: {error}"
-            )
+            print(f"Yahoo {symbol} 오류 {attempt + 1}/3: {error}")
 
         time.sleep(2 * (attempt + 1))
 
     if last_error:
-        print(
-            f"Yahoo {symbol} 최종 오류: "
-            f"{last_error}"
-        )
+        print(f"Yahoo {symbol} 최종 오류: {last_error}")
 
     return pd.DataFrame()
 
@@ -184,19 +261,9 @@ def get_yahoo_history(
 # =========================================================
 
 def get_toss_access_token():
-    """
-    Client Id와 Client Secret으로
-    토스증권 액세스 토큰을 발급받습니다.
-    """
-
-    if (
-        not TOSS_CLIENT_ID
-        or not TOSS_CLIENT_SECRET
-    ):
-        print(
-            "토스증권 Secret이 없습니다. "
-            "Yahoo Finance만 사용합니다."
-        )
+    """Client Id와 Client Secret으로 토스증권 액세스 토큰을 발급받습니다."""
+    if not TOSS_CLIENT_ID or not TOSS_CLIENT_SECRET:
+        print("토스증권 Secret이 없습니다. Yahoo Finance만 사용합니다.")
         return None
 
     try:
@@ -215,31 +282,18 @@ def get_toss_access_token():
             response.status_code,
             response.text[:500],
         )
-
         response.raise_for_status()
 
-        token = response.json().get(
-            "access_token"
-        )
+        token = response.json().get("access_token")
 
         if not token:
-            raise RuntimeError(
-                "토스증권 응답에 "
-                "access_token이 없습니다."
-            )
+            raise RuntimeError("토스증권 응답에 access_token이 없습니다.")
 
-        print(
-            "토스증권 액세스 토큰 발급 성공"
-        )
-
+        print("토스증권 액세스 토큰 발급 성공")
         return token
 
     except Exception as error:
-        print(
-            "토스증권 토큰 발급 실패. "
-            f"Yahoo로 전환합니다: {error}"
-        )
-
+        print(f"토스증권 토큰 발급 실패. Yahoo로 전환합니다: {error}")
         return None
 
 
@@ -247,18 +301,10 @@ def get_toss_history(
     symbol: str,
     access_token: str,
 ) -> pd.DataFrame:
-    """
-    토스증권 Open API에서
-    최근 120개 일봉 데이터를 가져옵니다.
-    """
-
+    """토스증권 Open API에서 최근 120개 일봉 데이터를 가져옵니다."""
     response = requests.get(
         f"{TOSS_BASE_URL}/api/v1/candles",
-        headers={
-            "Authorization": (
-                f"Bearer {access_token}"
-            )
-        },
+        headers={"Authorization": f"Bearer {access_token}"},
         params={
             "symbol": symbol,
             "interval": "1d",
@@ -273,56 +319,45 @@ def get_toss_history(
         response.status_code,
         response.text[:300],
     )
-
     response.raise_for_status()
 
-    payload = response.json()
-
-    candles = (
-        payload
-        .get("result", {})
-        .get("candles", [])
-    )
+    candles = response.json().get("result", {}).get("candles", [])
 
     if not candles:
-        raise RuntimeError(
-            f"토스증권 {symbol} "
-            "일봉 데이터가 비어 있습니다."
-        )
+        raise RuntimeError(f"토스증권 {symbol} 일봉 데이터가 비어 있습니다.")
 
     rows = []
 
     for item in candles:
-        rows.append(
-            {
-                "Date": pd.to_datetime(
-                    item["timestamp"]
-                ),
-                "Close": pd.to_numeric(
-                    item["closePrice"],
-                    errors="coerce",
-                ),
-            }
+        row = {
+            "Date": pd.to_datetime(item["timestamp"]),
+            "Close": pd.to_numeric(
+                item["closePrice"],
+                errors="coerce",
+            ),
+        }
+
+        # 토스 응답에 거래량 필드가 있을 때만 사용합니다.
+        volume_value = (
+            item.get("volume")
+            or item.get("tradingVolume")
+            or item.get("accumulatedTradingVolume")
         )
 
-    frame = (
-        pd.DataFrame(rows)
-        .dropna(subset=["Close"])
-    )
+        if volume_value is not None:
+            row["Volume"] = pd.to_numeric(
+                volume_value,
+                errors="coerce",
+            )
+
+        rows.append(row)
+
+    frame = pd.DataFrame(rows).dropna(subset=["Close"])
 
     if frame.empty:
-        raise RuntimeError(
-            f"토스증권 {symbol} "
-            "종가 데이터가 없습니다."
-        )
+        raise RuntimeError(f"토스증권 {symbol} 종가 데이터가 없습니다.")
 
-    frame = (
-        frame
-        .sort_values("Date")
-        .set_index("Date")
-    )
-
-    return frame
+    return frame.sort_values("Date").set_index("Date")
 
 
 # =========================================================
@@ -333,43 +368,42 @@ def calculate_rsi(
     close: pd.Series,
     period: int = 14,
 ):
-    """
-    RSI 14일 값을 계산합니다.
-    """
-
+    """Wilder 방식에 가까운 지수평활 RSI를 계산합니다."""
     delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
 
-    gain = (
-        delta
-        .clip(lower=0)
-        .rolling(period)
-        .mean()
+    average_gain = gain.ewm(
+        alpha=1 / period,
+        min_periods=period,
+        adjust=False,
+    ).mean()
+    average_loss = loss.ewm(
+        alpha=1 / period,
+        min_periods=period,
+        adjust=False,
+    ).mean()
+
+    relative_strength = average_gain / average_loss
+    rsi = 100 - (100 / (1 + relative_strength))
+
+    rsi = rsi.mask(
+        (average_loss == 0) & (average_gain > 0),
+        100,
     )
-
-    loss = (
-        -delta
-        .clip(upper=0)
-        .rolling(period)
-        .mean()
-    )
-
-    rs = gain / loss.replace(
+    rsi = rsi.mask(
+        (average_gain == 0) & (average_loss > 0),
         0,
-        float("nan"),
     )
-
-    rsi = 100 - (
-        100 / (1 + rs)
+    rsi = rsi.mask(
+        (average_gain == 0) & (average_loss == 0),
+        50,
     )
 
     valid = rsi.dropna()
-
     if valid.empty:
         return None
-
-    return float(
-        valid.iloc[-1]
-    )
+    return finite_float(valid.iloc[-1])
 
 
 def metrics_from_frame(
@@ -377,14 +411,10 @@ def metrics_from_frame(
     source: str,
 ):
     """
-    현재가, 전일 대비 등락률,
-    20일·60일 평균, RSI를 계산합니다.
+    가격뿐 아니라 기간 수익률, 이동평균 괴리, RSI, MACD,
+    변동성, 최근 종가 범위, 가능한 경우 거래량 배수까지 계산합니다.
     """
-
-    if (
-        frame.empty
-        or "Close" not in frame.columns
-    ):
+    if frame.empty or "Close" not in frame.columns:
         return None
 
     close = pd.to_numeric(
@@ -395,167 +425,188 @@ def metrics_from_frame(
     if len(close) < 2:
         return None
 
-    current = float(
-        close.iloc[-1]
-    )
+    current = finite_float(close.iloc[-1])
+    previous = finite_float(close.iloc[-2])
 
-    previous = float(
-        close.iloc[-2]
-    )
+    if current is None or previous in (None, 0):
+        return None
 
-    change_pct = (
-        (current - previous)
-        / previous
-        * 100
-    )
+    ma20 = finite_float(close.tail(20).mean()) if len(close) >= 20 else None
+    ma60 = finite_float(close.tail(60).mean()) if len(close) >= 60 else None
+    ma120 = finite_float(close.tail(120).mean()) if len(close) >= 120 else None
 
-    if len(close) >= 20:
-        ma20 = float(
-            close.tail(20).mean()
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    macd_series = ema12 - ema26
+    macd_signal_series = macd_series.ewm(span=9, adjust=False).mean()
+    macd_histogram_series = macd_series - macd_signal_series
+
+    returns = close.pct_change().dropna()
+    volatility_20d = None
+
+    if len(returns) >= 20:
+        volatility_20d = finite_float(
+            returns.tail(20).std() * math.sqrt(252) * 100
         )
-    else:
-        ma20 = None
 
-    if len(close) >= 60:
-        ma60 = float(
-            close.tail(60).mean()
+    close_high_20d = (
+        finite_float(close.tail(20).max())
+        if len(close) >= 20
+        else None
+    )
+    close_low_20d = (
+        finite_float(close.tail(20).min())
+        if len(close) >= 20
+        else None
+    )
+    close_high_60d = (
+        finite_float(close.tail(60).max())
+        if len(close) >= 60
+        else None
+    )
+
+    position_20d = None
+    if (
+        close_high_20d is not None
+        and close_low_20d is not None
+        and close_high_20d != close_low_20d
+    ):
+        position_20d = (
+            (current - close_low_20d)
+            / (close_high_20d - close_low_20d)
+            * 100
         )
+
+    drawdown_60d = None
+    if close_high_60d not in (None, 0):
+        drawdown_60d = (current / close_high_60d - 1) * 100
+
+    volume_ratio_20d = None
+    if "Volume" in frame.columns:
+        volume = pd.to_numeric(
+            frame["Volume"],
+            errors="coerce",
+        ).dropna()
+
+        if len(volume) >= 20:
+            average_volume = finite_float(volume.tail(20).mean())
+            current_volume = finite_float(volume.iloc[-1])
+
+            if average_volume not in (None, 0) and current_volume is not None:
+                volume_ratio_20d = current_volume / average_volume
+
+    last_index = close.index[-1]
+    if hasattr(last_index, "strftime"):
+        data_date = last_index.strftime("%Y-%m-%d")
     else:
-        ma60 = None
+        data_date = str(last_index)
 
     return {
         "current": current,
         "previous": previous,
-        "change_pct": change_pct,
+        "change_pct": (current / previous - 1) * 100,
+        "change_5d_pct": pct_return(close, 5),
+        "change_20d_pct": pct_return(close, 20),
         "ma20": ma20,
         "ma60": ma60,
+        "ma120": ma120,
+        "distance_ma20_pct": distance_pct(current, ma20),
+        "distance_ma60_pct": distance_pct(current, ma60),
+        "distance_ma120_pct": distance_pct(current, ma120),
         "rsi14": calculate_rsi(close),
+        "macd": finite_float(macd_series.iloc[-1]),
+        "macd_signal": finite_float(macd_signal_series.iloc[-1]),
+        "macd_histogram": finite_float(macd_histogram_series.iloc[-1]),
+        "volatility_20d_annualized_pct": volatility_20d,
+        "volume_ratio_20d": volume_ratio_20d,
+        "close_high_20d": close_high_20d,
+        "close_low_20d": close_low_20d,
+        "position_in_20d_range_pct": position_20d,
+        "drawdown_from_60d_high_pct": drawdown_60d,
+        "data_date": data_date,
         "source": source,
     }
 
 
 def get_market_metrics(symbol: str):
-    """
-    미국 지수는 Yahoo Finance에서 가져옵니다.
-    """
-
-    frame = get_yahoo_history(
-        symbol,
-        period="6mo",
-    )
-
-    return metrics_from_frame(
-        frame,
-        "Yahoo Finance",
-    )
+    frame = get_yahoo_history(symbol, period="1y")
+    return metrics_from_frame(frame, "Yahoo Finance")
 
 
 def get_watch_metrics(
     item: dict,
     toss_token,
 ):
-    """
-    관심 종목은 토스증권을 먼저 사용합니다.
-
-    토스증권 호출이 실패하면
-    Yahoo Finance로 자동 전환합니다.
-    """
-
+    """토스증권을 먼저 사용하고 실패하면 Yahoo Finance로 전환합니다."""
     if toss_token:
         try:
-            frame = get_toss_history(
-                item["toss"],
-                toss_token,
-            )
-
-            result = metrics_from_frame(
-                frame,
-                "토스증권",
-            )
+            frame = get_toss_history(item["toss"], toss_token)
+            result = metrics_from_frame(frame, "토스증권")
 
             if result is not None:
                 return result
 
         except Exception as error:
             print(
-                f"토스증권 "
-                f"{item['toss']} 실패. "
+                f"토스증권 {item['toss']} 실패. "
                 f"Yahoo로 전환: {error}"
             )
 
-    yahoo_frame = get_yahoo_history(
-        item["yahoo"],
-        period="6mo",
-    )
-
-    return metrics_from_frame(
-        yahoo_frame,
-        "Yahoo Finance",
-    )
+    yahoo_frame = get_yahoo_history(item["yahoo"], period="1y")
+    return metrics_from_frame(yahoo_frame, "Yahoo Finance")
 
 
 # =========================================================
 # 표시 형식
 # =========================================================
 
-def arrow(value: float) -> str:
-    if value > 0:
-        return "▲"
-
-    if value < 0:
-        return "▼"
-
-    return "－"
-
-
 def market_line(
     name: str,
     data,
 ) -> str:
     if data is None:
-        return (
-            f"{name}: 데이터 확인 실패"
-        )
+        return f"{name}: 데이터 확인 실패"
 
     change = data["change_pct"]
 
     if name == "미국 10년물":
-        bp = (
-            data["current"]
-            - data["previous"]
-        ) * 100
-
+        bp = (data["current"] - data["previous"]) * 100
         return (
-            f"{name}: "
-            f"{data['current']:.3f}% "
-            f"{arrow(bp)} "
-            f"{abs(bp):.1f}bp"
+            f"{name}: {data['current']:.3f}% "
+            f"{arrow(bp)} {abs(bp):.1f}bp"
         )
 
     if name == "VIX":
         return (
-            f"{name}: "
-            f"{data['current']:.2f} "
-            f"{arrow(change)} "
-            f"{abs(change):.2f}%"
+            f"{name}: {data['current']:.2f} "
+            f"{arrow(change)} {abs(change):.2f}%"
         )
 
     return (
-        f"{name}: "
-        f"{data['current']:,.2f} "
-        f"{arrow(change)} "
-        f"{abs(change):.2f}%"
+        f"{name}: {data['current']:,.2f} "
+        f"{arrow(change)} {abs(change):.2f}%"
     )
 
 
-def stock_price(
-    currency: str,
-    value: float,
-) -> str:
-    if currency == "KRW":
-        return f"₩{value:,.0f}"
+def technical_detail(data) -> str:
+    if data is None:
+        return "기술지표 확인 불가"
 
-    return f"${value:,.2f}"
+    macd_direction = (
+        "개선"
+        if finite_float(data.get("macd_histogram")) is not None
+        and data["macd_histogram"] > 0
+        else "약화"
+    )
+
+    return (
+        f"5일 {display_pct(data.get('change_5d_pct'))} · "
+        f"20일 {display_pct(data.get('change_20d_pct'))}\n"
+        f"20일선 괴리 {display_pct(data.get('distance_ma20_pct'))} · "
+        f"60일선 괴리 {display_pct(data.get('distance_ma60_pct'))}\n"
+        f"RSI {display_number(data.get('rsi14'))} · "
+        f"MACD 모멘텀 {macd_direction}"
+    )
 
 
 # =========================================================
@@ -576,36 +627,32 @@ def technical_view(
     ma20 = data["ma20"]
     ma60 = data["ma60"]
     rsi = data["rsi14"]
+    gap60 = data.get("distance_ma60_pct")
+    change5 = data.get("change_5d_pct")
+    macd_hist = data.get("macd_histogram")
 
-    if (
-        ma20 is None
-        or ma60 is None
-        or rsi is None
-    ):
+    if ma20 is None or ma60 is None or rsi is None:
         return (
             "⏸ 보유·관찰",
-            (
-                "이동평균 또는 RSI 계산에 "
-                "필요한 자료가 부족합니다."
-            ),
+            "이동평균 또는 RSI 계산에 필요한 자료가 부족합니다.",
         )
 
     if rsi >= 75:
         return (
             "⚠️ 비중 확대 자제",
             (
-                f"RSI {rsi:.0f}로 "
-                "단기 과열 가능성을 "
-                "점검할 구간입니다."
+                f"RSI {rsi:.0f}로 과열권이며, "
+                f"5일 수익률은 {display_pct(change5)}입니다."
             ),
         )
 
     if current < ma60:
+        macd_text = "개선 중" if macd_hist is not None and macd_hist > 0 else "약화 중"
         return (
             "⚠️ 관망·비중 점검",
             (
-                "현재가가 60일 평균보다 낮고 "
-                f"RSI는 {rsi:.0f}입니다."
+                f"현재가가 60일선 대비 {display_pct(gap60)}이고 "
+                f"RSI는 {rsi:.0f}, MACD 모멘텀은 {macd_text}입니다."
             ),
         )
 
@@ -616,19 +663,18 @@ def technical_view(
         and rsi <= 45
     ):
         return (
-            "✅ 분할매수 검토",
+            "✅ 분할 접근 검토",
             (
-                "시장 변동성이 높고 "
-                f"RSI {rsi:.0f}로 "
-                "단기 조정 구간입니다."
+                f"VIX {vix_value:.1f}의 높은 변동성 환경에서 "
+                f"RSI {rsi:.0f}의 단기 조정 구간입니다."
             ),
         )
 
     if current > ma20 > ma60:
         return (
-            "⏸ 보유",
+            "⏸ 보유·추세 관찰",
             (
-                "20일 평균이 60일 평균보다 높고 "
+                f"현재가가 20·60일선 위에 있고 "
                 f"RSI는 {rsi:.0f}입니다."
             ),
         )
@@ -636,8 +682,9 @@ def technical_view(
     return (
         "⏸ 보유·관찰",
         (
-            "단기와 중기 추세가 혼조이며 "
-            f"RSI는 {rsi:.0f}입니다."
+            f"단기·중기 추세가 혼조이며 "
+            f"RSI는 {rsi:.0f}, 5일 수익률은 "
+            f"{display_pct(change5)}입니다."
         ),
     )
 
@@ -647,19 +694,12 @@ def technical_view(
 # =========================================================
 
 def fetch_news():
-    """
-    Google News RSS에서
-    핵심 뉴스 제목 3개를 가져옵니다.
-    """
-
+    """Google News RSS에서 중복을 제거한 핵심 뉴스 제목 3개를 가져옵니다."""
     articles = []
     seen = set()
 
     for query in NEWS_QUERIES:
-        encoded = urllib.parse.quote(
-            query
-        )
-
+        encoded = urllib.parse.quote(query)
         url = (
             "https://news.google.com/rss/search"
             f"?q={encoded}"
@@ -676,29 +716,28 @@ def fetch_news():
 
             for entry in feed.entries[:5]:
                 title = html.unescape(
-                    entry.get(
-                        "title",
-                        "",
-                    )
+                    entry.get("title", "")
                 ).strip()
+                link = entry.get("link", "").strip()
 
-                link = entry.get(
-                    "link",
-                    "",
-                ).strip()
-
-                if not title:
-                    continue
-
-                if title in seen:
+                if not title or title in seen:
                     continue
 
                 seen.add(title)
+                source_info = entry.get("source", {})
+
+                if hasattr(source_info, "get"):
+                    source = source_info.get("title", "")
+                else:
+                    source = ""
 
                 articles.append(
                     {
                         "title": title,
                         "link": link,
+                        "source": source,
+                        "published": entry.get("published", ""),
+                        "query": query,
                     }
                 )
 
@@ -706,10 +745,7 @@ def fetch_news():
                     return articles
 
         except Exception as error:
-            print(
-                "뉴스 가져오기 오류:",
-                error,
-            )
+            print("뉴스 가져오기 오류:", error)
 
     return articles[:3]
 
@@ -723,55 +759,127 @@ def rule_based_summary(
     rule_views,
 ):
     vix = market_data.get("VIX")
-
-    if vix:
-        vix_value = vix["current"]
-    else:
-        vix_value = None
+    vix_value = vix["current"] if vix else None
 
     if vix_value is None:
         market_text = (
-            "VIX 확인이 필요해 시장 변동성 "
-            "판단을 보수적으로 유지하세요."
+            "VIX 확인이 필요해 시장 변동성 판단을 "
+            "보수적으로 유지할 필요가 있습니다."
         )
-
     elif vix_value >= 25:
         market_text = (
-            "VIX가 높은 구간이므로 "
-            "한 번에 매수하기보다 "
-            "분할 접근과 현금 관리가 중요합니다."
+            "VIX가 높은 구간이므로 가격 변동 확대와 "
+            "현금 비중 관리가 중요합니다."
         )
-
     elif vix_value >= 20:
         market_text = (
-            "변동성이 다소 높아 "
-            "추격 매수보다 가격과 비중을 "
-            "나누는 접근이 적절합니다."
+            "변동성이 다소 높아 추격보다 가격과 비중을 "
+            "나누는 접근이 필요합니다."
         )
-
     else:
         market_text = (
-            "VIX 기준 변동성은 비교적 안정적이지만 "
-            "종목별 과열 여부는 별도로 확인하세요."
+            "VIX 기준 시장 변동성은 비교적 안정적이지만 "
+            "종목별 모멘텀은 별도로 확인해야 합니다."
         )
 
-    actions = ", ".join(
-        f"{name} {view[0]}"
-        for name, view
-        in rule_views.items()
+    actions = "\n".join(
+        f"• {name}: {view[0]} — {view[1]}"
+        for name, view in rule_views.items()
     )
 
     return (
-        f"{market_text}\n"
-        f"관심 종목 참고 신호: {actions}\n"
-        "※ 자동 계산된 참고 정보이며 "
-        "실제 주문 지시가 아닙니다."
+        f"{market_text}\n\n"
+        f"{actions}\n\n"
+        "※ 자동 계산된 참고 정보이며 실제 주문 지시가 아닙니다."
     )
 
 
 # =========================================================
-# OpenAI 분석
+# OpenAI 교차분석
 # =========================================================
+
+AI_INSTRUCTIONS = """
+당신은 한국어로 작성하는 시장 및 기술지표 해설 보조 AI다.
+제공된 JSON 데이터만 사용해 규칙 기반 결과를 교차검토하고,
+단순 반복이 아닌 추세·모멘텀·변동성·시장 환경의 관계를 설명한다.
+
+반드시 지킬 원칙:
+1. JSON에 없는 가격, 실적, 뉴스 본문, 목표가, 지지선·저항선을 만들지 않는다.
+2. 뉴스는 제목·출처·시각만 제공되므로 본문을 읽은 것처럼 말하지 않는다.
+3. 규칙 신호에 무조건 동의하지 말고, 지표가 상충하면 그 사실을 명시한다.
+4. RSI가 낮다는 이유만으로 바닥이나 반등을 단정하지 않는다.
+5. 매수·매도를 명령하거나 수익을 보장하지 않는다.
+6. 숫자를 언급할 때는 입력에 있는 값을 사용하고, 데이터가 없으면 생략한다.
+7. 짧은 기간 급락과 중기 추세 훼손을 구분한다.
+8. 마크다운 표와 ** 굵은 글씨는 사용하지 않는다.
+9. 전체 결과는 공백 포함 약 2,800자 이내로 작성한다.
+
+출력 형식:
+[시장 환경]
+• 지수, 반도체 지수, VIX, 금리, 달러를 연결한 해석 3~4개
+
+[종목별 GPT 교차분석]
+각 종목마다 아래 3개 항목을 작성한다.
+종목명
+• 추세·모멘텀: 5일/20일 수익률, 이동평균 괴리, RSI, MACD를 연결
+• 규칙 교차판단: 규칙 신호를 지지하는 근거와 반대 또는 완화 근거
+• 다음 확인 조건: 입력에 있는 20일 종가 고가·저가나 이동평균을 이용한 조건
+
+[오늘의 종합 안내]
+• 관심종목의 공통 위험 또는 상대적으로 다른 흐름
+• 뉴스 제목으로 확인 가능한 변수와 확인 불가능한 부분
+• 다음 브리핑에서 확인할 항목 3개
+
+마지막 줄:
+※ AI 해설은 입력 데이터 기반 참고 정보이며 실제 주문 지시가 아닙니다.
+""".strip()
+
+
+def build_ai_payload(
+    market_data,
+    watch_data,
+    news,
+    rule_views,
+):
+    market_payload = {}
+
+    for name, symbol in MARKET_SYMBOLS.items():
+        market_payload[name] = {
+            "ticker": symbol,
+            "metrics": market_data.get(name),
+        }
+
+    watch_payload = {}
+
+    for name, item in WATCHLIST.items():
+        action, reason = rule_views[name]
+        watch_payload[name] = {
+            "ticker": item["yahoo"],
+            "currency": item["currency"],
+            "metrics": watch_data.get(name),
+            "rule_result": {
+                "signal": action,
+                "reason": reason,
+            },
+        }
+
+    return json_ready(
+        {
+            "generated_at_kst": datetime.now(KST).isoformat(
+                timespec="minutes"
+            ),
+            "market": market_payload,
+            "watchlist": watch_payload,
+            "news": news,
+            "data_notes": [
+                "가격은 공급원별 최근 일봉이며 실시간 체결가가 아닐 수 있음",
+                "20일 고가·저가는 장중 고저가가 아닌 종가 기준",
+                "거래량 데이터가 없는 공급원은 volume_ratio_20d가 null",
+                "뉴스는 RSS 제목만 수집하며 기사 본문은 제공하지 않음",
+            ],
+        }
+    )
+
 
 def make_ai_analysis(
     market_data,
@@ -779,121 +887,50 @@ def make_ai_analysis(
     news,
     rule_views,
 ):
-    """
-    OPENAI_API_KEY가 있을 때만
-    AI 종합 분석을 생성합니다.
-
-    키가 없다면 규칙 기반 분석을 사용합니다.
-    """
-
-    if not OPENAI_API_KEY:
+    """OPENAI_API_KEY가 있을 때 GPT 기술지표 교차분석을 생성합니다."""
+    if not OPENAI_API_KEY or OpenAI is None:
         return None
 
-    if OpenAI is None:
-        return None
-
-    market_text = "\n".join(
-        market_line(
-            name,
-            market_data.get(name),
-        )
-        for name in MARKET_SYMBOLS
+    payload = build_ai_payload(
+        market_data,
+        watch_data,
+        news,
+        rule_views,
     )
-
-    watch_lines = []
-
-    for name, item in WATCHLIST.items():
-        data = watch_data.get(name)
-
-        if data is None:
-            watch_lines.append(
-                f"{name}: 데이터 없음"
-            )
-            continue
-
-        action, reason = rule_views[name]
-
-        if data["rsi14"] is None:
-            rsi_text = "확인 불가"
-        else:
-            rsi_text = (
-                f"{data['rsi14']:.1f}"
-            )
-
-        watch_lines.append(
-            f"{name}: "
-            f"{stock_price(item['currency'], data['current'])}, "
-            f"등락 {data['change_pct']:+.2f}%, "
-            f"RSI {rsi_text}, "
-            f"데이터 출처 {data['source']}, "
-            f"규칙 신호 {action}, "
-            f"근거 {reason}"
-        )
-
-    news_text = "\n".join(
-        f"- {item['title']}"
-        for item in news
-    )
-
-    if not news_text:
-        news_text = "뉴스 없음"
-
-    prompt = f"""
-아래 데이터만 사용하여 한국어 아침 투자 브리핑을 작성하세요.
-
-규칙:
-- 확정적 예측을 하지 마세요.
-- 수익을 보장하지 마세요.
-- 제공되지 않은 사실을 만들지 마세요.
-- 전체 분량은 9문장 이내로 작성하세요.
-- 매수나 매도를 직접 명령하지 마세요.
-- 검토, 관찰, 분할 접근, 비중 점검 등의 표현을 사용하세요.
-
-구성:
-1. 시장 전체 해석 2문장
-2. 삼성전자 1문장
-3. SK하이닉스 1문장
-4. 현대차2우B 1문장
-5. TIGER 코리아휴머노이드로봇산업 1문장
-6. 테슬라 1문장
-7. 뉴스에서 오늘 확인할 변수 1문장
-8. 마지막에 현금 운용 원칙 1문장
-
-[시장 데이터]
-{market_text}
-
-[관심 종목]
-{chr(10).join(watch_lines)}
-
-[뉴스 제목]
-{news_text}
-""".strip()
 
     try:
         client = OpenAI(
             api_key=OPENAI_API_KEY,
-            timeout=45.0,
+            timeout=90.0,
             max_retries=2,
         )
 
         response = client.responses.create(
             model=OPENAI_MODEL,
-            instructions=(
-                "당신은 제공된 숫자와 뉴스 제목만 "
-                "근거로 신중하게 설명하는 "
-                "투자 브리핑 작성자입니다."
+            reasoning={
+                "effort": OPENAI_REASONING_EFFORT,
+            },
+            text={
+                "verbosity": "medium",
+            },
+            instructions=AI_INSTRUCTIONS,
+            input=(
+                "다음 JSON을 분석하세요. 모든 숫자와 판단 근거는 "
+                "이 JSON 안에서만 가져오세요.\n\n"
+                + json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
             ),
-            input=prompt,
+            max_output_tokens=3000,
         )
 
-        return response.output_text.strip()
+        result = response.output_text.strip()
+        return result or None
 
     except Exception as error:
-        print(
-            "OpenAI 분석 오류:",
-            error,
-        )
-
+        print("OpenAI 분석 오류:", error)
         return None
 
 
@@ -923,8 +960,30 @@ def send_html(text: str):
         response.status_code,
         response.text,
     )
-
     response.raise_for_status()
+
+
+def build_news_html(news):
+    news_lines = []
+
+    for index, item in enumerate(news, start=1):
+        safe_title = html.escape(item["title"])
+        safe_link = html.escape(
+            item["link"],
+            quote=True,
+        )
+
+        if safe_link:
+            news_lines.append(
+                f'{index}. <a href="{safe_link}">{safe_title}</a>'
+            )
+        else:
+            news_lines.append(f"{index}. {safe_title}")
+
+    if news_lines:
+        return "\n\n".join(news_lines)
+
+    return "뉴스를 가져오지 못했습니다."
 
 
 # =========================================================
@@ -932,48 +991,28 @@ def send_html(text: str):
 # =========================================================
 
 def main():
-    # 토스증권 토큰
     toss_token = get_toss_access_token()
 
-    # 미국 시장 데이터
     market_data = {
         name: get_market_metrics(symbol)
-        for name, symbol
-        in MARKET_SYMBOLS.items()
+        for name, symbol in MARKET_SYMBOLS.items()
     }
 
-    # 관심 종목 데이터
     watch_data = {
-        name: get_watch_metrics(
-            item,
-            toss_token,
-        )
-        for name, item
-        in WATCHLIST.items()
+        name: get_watch_metrics(item, toss_token)
+        for name, item in WATCHLIST.items()
     }
 
-    # VIX
     vix_data = market_data.get("VIX")
+    vix_value = vix_data["current"] if vix_data else None
 
-    if vix_data:
-        vix_value = vix_data["current"]
-    else:
-        vix_value = None
-
-    # 종목별 규칙 판단
     rule_views = {
-        name: technical_view(
-            data,
-            vix_value,
-        )
-        for name, data
-        in watch_data.items()
+        name: technical_view(data, vix_value)
+        for name, data in watch_data.items()
     }
 
-    # 뉴스
     news = fetch_news()
 
-    # AI 분석
     ai_analysis = make_ai_analysis(
         market_data,
         watch_data,
@@ -981,28 +1020,13 @@ def main():
         rule_views,
     )
 
-    now = datetime.now(
-        ZoneInfo("Asia/Seoul")
-    ).strftime(
-        "%Y년 %m월 %d일 %H:%M"
-    )
-
-    # -------------------------
-    # 미국 시장 표시
-    # -------------------------
+    now = datetime.now(KST).strftime("%Y년 %m월 %d일 %H:%M")
 
     market_section = "\n".join(
-        market_line(
-            name,
-            market_data.get(name),
-        )
+        market_line(name, market_data.get(name))
         for name in MARKET_SYMBOLS
         if name != "VIX"
     )
-
-    # -------------------------
-    # 관심 종목 표시
-    # -------------------------
 
     stock_blocks = []
 
@@ -1017,9 +1041,8 @@ def main():
             )
             continue
 
-        source = html.escape(
-            data["source"]
-        )
+        source = html.escape(data["source"])
+        detail = html.escape(technical_detail(data))
 
         stock_blocks.append(
             f"<b>{html.escape(name)}</b>\n"
@@ -1028,12 +1051,13 @@ def main():
             f"{abs(data['change_pct']):.2f}%\n"
             f"{action}\n"
             f"{html.escape(reason)}\n"
-            f"<i>출처: {source}</i>"
+            f"{detail}\n"
+            f"<i>출처: {source} · 기준일: "
+            f"{html.escape(data['data_date'])}</i>"
         )
 
-    # 첫 번째 메시지
     first_message = (
-        "☀️ <b>오전 8시 AI 투자 브리핑</b>\n"
+        "☀️ <b>AI 투자 브리핑</b>\n"
         f"{now}\n\n"
         "━━━━━━━━━━━━━━\n"
         "🇺🇸 <b>미국 시장</b>\n"
@@ -1044,90 +1068,38 @@ def main():
         "━━━━━━━━━━━━━━\n\n"
         + "\n\n".join(stock_blocks)
         + (
-            "\n\n※ 최근 종가·이동평균·RSI 기반 "
-            "참고 신호이며 실제 주문 지시가 아닙니다."
+            "\n\n※ 최근 일봉 기반 참고 신호이며 "
+            "실시간 시세 또는 실제 주문 지시가 아닙니다."
         )
     )
 
     send_html(first_message)
 
-    # -------------------------
-    # 뉴스 표시
-    # -------------------------
-
-    news_lines = []
-
-    for index, item in enumerate(
-        news,
-        start=1,
-    ):
-        safe_title = html.escape(
-            item["title"]
-        )
-
-        safe_link = html.escape(
-            item["link"],
-            quote=True,
-        )
-
-        if safe_link:
-            news_lines.append(
-                f'{index}. '
-                f'<a href="{safe_link}">'
-                f'{safe_title}</a>'
-            )
-        else:
-            news_lines.append(
-                f"{index}. {safe_title}"
-            )
-
-    if news_lines:
-        news_section = "\n\n".join(
-            news_lines
-        )
-    else:
-        news_section = (
-            "뉴스를 가져오지 못했습니다."
-        )
-
-    # -------------------------
-    # AI 또는 규칙 기반 분석
-    # -------------------------
-
-    if ai_analysis:
-        analysis_title = (
-            "🤖 <b>AI 종합 분석</b>"
-        )
-
-        analysis_section = html.escape(
-            ai_analysis
-        )
-
-    else:
-        analysis_title = (
-            "🧭 <b>규칙 기반 종합 안내</b>"
-        )
-
-        analysis_section = html.escape(
-            rule_based_summary(
-                market_data,
-                rule_views,
-            )
-        )
-
-    # 두 번째 메시지
-    second_message = (
+    news_message = (
         "📰 <b>오늘의 핵심 뉴스 3건</b>\n\n"
-        f"{news_section}\n\n"
-        "━━━━━━━━━━━━━━\n"
-        f"{analysis_title}\n"
-        "━━━━━━━━━━━━━━\n"
-        f"{analysis_section}\n\n"
-        "※ 뉴스 제목과 가격 데이터는 "
-        "시차가 있을 수 있습니다."
+        f"{build_news_html(news)}\n\n"
+        "※ 뉴스 제목과 가격 데이터는 시차가 있을 수 있습니다."
     )
 
-    send_html(second_message)
+    send_html(news_message)
+
+    if ai_analysis:
+        analysis_title = "🤖 <b>GPT 기술지표 교차분석</b>"
+        analysis_text = truncate_plain_text(ai_analysis)
+    else:
+        analysis_title = "🧭 <b>규칙 기반 종합 안내</b>"
+        analysis_text = rule_based_summary(
+            market_data,
+            rule_views,
+        )
+
+    analysis_message = (
+        f"{analysis_title}\n"
+        "━━━━━━━━━━━━━━\n"
+        f"{html.escape(analysis_text)}"
+    )
+
+    send_html(analysis_message)
 
 
 if __name__ == "__main__":
